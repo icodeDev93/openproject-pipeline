@@ -1,0 +1,6 @@
+steps:
+  - name: 'python:3.11-slim'
+    entrypoint: 'python'
+    args: ['main.py']
+    env:
+      - 'GCP_PROJECT=data-pipeline-475718'
