@@ -34,6 +34,11 @@ IS_LOCAL = os.getenv('LOCAL_TEST', 'false').lower() == 'true'
 def log(m):
     print(f"[LOG] {m}", flush=True)
 
+# === STARTUP LOGS ===
+log("Starting OpenProject → BigQuery Sync Service...")
+log(f"Running in {'LOCAL' if IS_LOCAL else 'CLOUD'} mode")
+log(f"Target: {BASE_URL} → gs://{GCS_BUCKET} → {PROJECT_ID}.{DATASET_ID}")
+
 # === RETRY SESSION ===
 session = requests.Session()
 session.auth = ("apikey", API_TOKEN)
@@ -371,5 +376,8 @@ def trigger():
 def health():
     return "OK", 200
 
-# === NO SERVER START HERE — DOCKER DOES IT ===
+@app.route('/ready')
+def ready():
+    return "OK", 200
 
+# === NO SERVER START HERE — DOCKER DOES IT ===
