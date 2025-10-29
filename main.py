@@ -8,8 +8,7 @@ import math
 import threading
 import time
 from io import StringIO
-from flask import Flask, request, jsonify
-from waitress import serve
+from flask import Flask, jsonify
 
 # === FLASK APP ===
 app = Flask(__name__)
@@ -23,7 +22,7 @@ BASE_URL = os.getenv('OPENPROJECT_URL')
 PROJECT_ID = os.getenv('GCP_PROJECT_ID')
 DATASET_ID = os.getenv('BIGQUERY_DATASET_ID')
 GCS_BUCKET = os.getenv('GCS_BUCKET')
-PAGE_SIZE = int(os.getenv('PAGE_SIZE', 1000))
+PAGE_SIZE = int(os.getenv('PAGE_SIZE', 5000))
 TIMEOUT_SECS = int(os.getenv('TIMEOUT_SECS', 120))
 
 if not all([API_TOKEN, BASE_URL, PROJECT_ID, DATASET_ID, GCS_BUCKET]):
@@ -47,7 +46,6 @@ if not IS_LOCAL:
     from google.cloud import storage, bigquery, secretmanager
     from google.oauth2 import service_account
     try:
-        # Fetch service account key from Secret Manager
         client = secretmanager.SecretManagerServiceClient()
         name = f"projects/{PROJECT_ID}/secrets/openproject-service-account-key/versions/latest"
         response = client.access_secret_version(name=name)
@@ -104,7 +102,7 @@ def format_hours_hm(h):
     mins = int(round(h * 60))
     return f"{mins // 60}h {mins % 60}m"
 
-# === FETCH ALL WORK PACKAGES (WITH RETRY) ===
+# === FETCH ALL WORK PACKAGES ===
 @retry(max_attempts=3, delay=10, backoff=2)
 def fetch_all_work_packages_for_project(project_id):
     base = urljoin(BASE_URL, "/api/v3/work_packages")
@@ -125,7 +123,7 @@ def fetch_all_work_packages_for_project(project_id):
         return []
 
     total_pages = math.ceil(total_expected / page_size)
-    log(f"Project {project_id}: {total_expected} WPs to {total_pages} page(s)")
+    log(f"Project {project_id}: {total_expected} WPs → {total_pages} page(s)")
 
     offset = 1
     while total_fetched < total_expected:
@@ -149,7 +147,7 @@ def fetch_all_work_packages_for_project(project_id):
                 yield it
 
         current_page = (offset - 1) // page_size + 1
-        log(f"  to Page {current_page}/{total_pages} | Fetched {len(items)} | Total: {total_fetched}/{total_expected}")
+        log(f"  → Page {current_page}/{total_pages} | Fetched {len(items)} | Total: {total_fetched}/{total_expected}")
         offset += len(items) if items else page_size
 
 # === TASK CATEGORY HELPERS ===
@@ -322,8 +320,8 @@ def openproject_to_bigquery():
             continue
 
         log(f"Fetching: {project_name}")
-        work_packages = fetch_all_work_packages_for_project(project_id)
-        if work_packages is None or len(work_packages) == 0:
+        work_packages = list(fetch_all_work_packages_for_project(project_id))
+        if not work_packages:
             log(f"No data for {project_name}")
             continue
 
@@ -353,7 +351,7 @@ def openproject_to_bigquery():
         df = pd.DataFrame(rows)
         for col in ['DATE_CREATED', 'DATE_UPDATED', 'START_DATE', 'FINISH_DATE']:
             if col in df.columns:
-                df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%m-%d')
+                df[col] = pd.to_datetime(df[col], errors='coerce').dt.strftime('%Y-%-m-%d')
 
         try:
             gcs_uri = upload_csv_to_gcs(df, GCS_BUCKET, csv_filename)
@@ -363,19 +361,14 @@ def openproject_to_bigquery():
 
     log("Sync completed")
 
-# === HTTP ENDPOINT ===
+# === HTTP ENDPOINTS ===
 @app.route('/', methods=['GET'])
 def trigger():
     threading.Thread(target=openproject_to_bigquery).start()
     return jsonify({"status": "Sync started"}), 200
 
-# === LOCAL RUN ===
-'''if __name__ == '__main__':
-    openproject_to_bigquery()
-else:
-    log("Starting Cloud Run service...")
-    serve(app, host='0.0.0.0', port=8080)'''
-# === ALWAYS START SERVER IN CLOUD ===
-log("Starting Cloud Run service...")
-serve(app, host='0.0.0.0', port=8080)
+@app.route('/health')
+def health():
+    return "OK", 200
 
+# === NO SERVER START HERE — DOCKER DOES IT ===
