@@ -370,8 +370,12 @@ def trigger():
     return jsonify({"status": "Sync started"}), 200
 
 # === LOCAL RUN ===
-if __name__ == '__main__':
+'''if __name__ == '__main__':
     openproject_to_bigquery()
 else:
     log("Starting Cloud Run service...")
-    serve(app, host='0.0.0.0', port=8080)
+    serve(app, host='0.0.0.0', port=8080)'''
+# === ALWAYS START SERVER IN CLOUD ===
+log("Starting Cloud Run service...")
+serve(app, host='0.0.0.0', port=8080)
+
