@@ -1,0 +1,11 @@
+google-cloud-bigquery
+google-cloud-storage
+google-cloud-secret-manager
+pandas
+pyarrow
+pandas-gbq
+requests
+python-dotenv
+openpyxl
+flask
+waitress
