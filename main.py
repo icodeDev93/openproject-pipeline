@@ -14,6 +14,7 @@ from flask import Flask, jsonify
 app = Flask(__name__)
 
 # === LOAD ENV ===
+# We keep load_dotenv here to load from a .env file during local testing/build.
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -25,11 +26,15 @@ GCS_BUCKET = os.getenv('GCS_BUCKET')
 PAGE_SIZE = int(os.getenv('PAGE_SIZE', 5000))
 TIMEOUT_SECS = int(os.getenv('TIMEOUT_SECS', 120))
 
-if not all([API_TOKEN, BASE_URL, PROJECT_ID, DATASET_ID, GCS_BUCKET]):
-    raise EnvironmentError("Missing required env vars")
+# We remove the failing environment check here.
 
 # === AUTO-DETECT: LOCAL OR CLOUD ===
 IS_LOCAL = os.getenv('LOCAL_TEST', 'false').lower() == 'true'
+
+# === GLOBAL CLIENT HANDLES (Initialized later) ===
+storage_client = None
+bq_client = None
+sm_imported = False # Flag to track if GCP modules were imported
 
 def log(m):
     print(f"[LOG] {m}", flush=True)
@@ -44,23 +49,46 @@ session = requests.Session()
 session.auth = ("apikey", API_TOKEN)
 session.headers.update({"Accept": "application/hal+json"})
 
-# === GCP CLIENTS (ONLY IF NOT LOCAL) ===
-storage_client = None
-bq_client = None
-if not IS_LOCAL:
-    from google.cloud import storage, bigquery, secretmanager
-    from google.oauth2 import service_account
-    try:
-        client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{PROJECT_ID}/secrets/openproject-service-account-key/versions/latest"
-        response = client.access_secret_version(name=name)
-        secret_value = response.payload.data.decode('UTF-8')
-        credentials = service_account.Credentials.from_service_account_info(json.loads(secret_value))
+# ----------------------------------------------------
+# 🌟 NEW FUNCTION: Client Initialization
+# This runs only when a request hits the '/' endpoint.
+# ----------------------------------------------------
+def _init_clients():
+    global storage_client, bq_client, sm_imported
 
-        storage_client = storage.Client(credentials=credentials, project=PROJECT_ID)
-        bq_client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
-    except Exception as e:
-        raise RuntimeError(f"Failed to init GCP clients: {e}")
+    # 1. Check if required environment variables are present
+    if not all([API_TOKEN, BASE_URL, PROJECT_ID, DATASET_ID, GCS_BUCKET]):
+        raise EnvironmentError("Missing required env vars. Check Cloud Run configuration.")
+
+    # 2. Skip client init if already done
+    if storage_client and bq_client:
+        return
+
+    if not IS_LOCAL:
+        log("Initializing GCP clients...")
+        # Only import GCP modules if we need them, using the flag to avoid repeated import
+        if not sm_imported:
+            from google.cloud import storage, bigquery, secretmanager
+            from google.oauth2 import service_account
+            sm_imported = True
+
+        try:
+            # Access the secret key for service account credentials
+            client = secretmanager.SecretManagerServiceClient()
+            name = f"projects/{PROJECT_ID}/secrets/openproject-service-account-key/versions/latest"
+            response = client.access_secret_version(name=name)
+            secret_value = response.payload.data.decode('UTF-8')
+            credentials = service_account.Credentials.from_service_account_info(json.loads(secret_value))
+
+            # Initialize global client objects
+            storage_client = storage.Client(credentials=credentials, project=PROJECT_ID)
+            bq_client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
+            log("GCP clients initialized successfully.")
+        except Exception as e:
+            # Raising a RuntimeError will stop the sync thread.
+            raise RuntimeError(f"Failed to init GCP clients (Check permissions): {e}")
+    else:
+        log("Running in local mode, skipping GCP client init.")
 
 # === RETRY DECORATOR ===
 def retry(max_attempts=3, delay=10, backoff=2):
@@ -243,6 +271,7 @@ def upload_csv_to_gcs(df, bucket_name, blob_name):
         log(f"[LOCAL GCS] Saved {blob_name}")
         return f"file://{path}"
     else:
+        # Use the globally defined storage_client
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         blob.upload_from_string(csv_buffer.getvalue(), content_type="text/csv")
@@ -255,6 +284,7 @@ def load_gcs_to_bigquery(gcs_uri, table_name):
         log(f"[LOCAL BQ] Would load {gcs_uri} to {DATASET_ID}.{table_name}")
         return
 
+    # Use the globally defined bq_client
     dataset_ref = bq_client.dataset(DATASET_ID)
     table_ref = dataset_ref.table(table_name)
 
@@ -294,6 +324,13 @@ def load_gcs_to_bigquery(gcs_uri, table_name):
 
 # === MAIN SYNC ===
 def openproject_to_bigquery():
+    # 🌟 NEW: Initialize clients at the start of the sync job
+    try:
+        _init_clients()
+    except Exception as e:
+        log(f"Sync failed at initialization: {e}")
+        return
+
     url = urljoin(BASE_URL + "/", "api/v3/projects?offset=1&pageSize=100")
     projects = []
     while url:
