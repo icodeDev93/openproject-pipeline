@@ -1,6 +1,50 @@
 steps:
-  - name: 'python:3.11-slim'
-    entrypoint: 'python'
-    args: ['main.py']
-    env:
-      - 'GCP_PROJECT=data-pipeline-475718'
+  # Step 1: Build the Docker Image
+  # Uses the Dockerfile.txt to create a container image
+  - name: 'gcr.io/cloud-builders/docker'
+    id: "Build"
+    args:
+      - build
+      - '-t'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/openproject-pipeline/openproject-sync:$COMMIT_SHA'
+      - '.'
+
+  # Step 2: Push the Docker Image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: "Push"
+    args:
+      - push
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/openproject-pipeline/openproject-sync:$COMMIT_SHA'
+
+  # Step 3: Deploy to Cloud Run (The corrected step using explicit values)
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk:slim'
+    id: "Deploy"
+    args:
+      - gcloud
+      - run
+      - deploy
+      - openproject-sync # Name of the Cloud Run service
+      - --image
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/openproject-pipeline/openproject-sync:$COMMIT_SHA'
+      - --region
+      - us-central1
+      - --platform
+      - managed
+      - --allow-unauthenticated # Required to hit the trigger endpoint
+      - --cpu
+      - '1'
+      - --timeout
+      - 360s
+      - --memory
+      - 512Mi
+      # CRITICAL: Service Account assigned to the Cloud Run service
+      - --service-account
+      - 'openproject-pipeline-sa@data-pipeline-475718.iam.gserviceaccount.com'
+      # CRITICAL: Set all required environment variables
+      - --set-env-vars
+      - >
+        API_TOKEN='42d5fcea4bbcbfcb1e3b26045ed5799230fb2926180a69ba5e5e5a49ada5eb40',
+        BASE_URL='https://task.deepfunding.ai/',
+        PROJECT_ID='$PROJECT_ID',
+        DATASET_ID='openproject_data',
+        GCS_BUCKET='openproject_test_bkt'
