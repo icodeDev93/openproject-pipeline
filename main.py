@@ -13,8 +13,7 @@ from flask import Flask, jsonify
 # === FLASK APP ===
 app = Flask(__name__)
 
-# === LOAD ENV ===
-# We keep load_dotenv here to load from a .env file during local testing/build.
+# === LOAD ENV (Kept for local testing, ignored by Cloud Run ENV vars) ===
 from dotenv import load_dotenv
 load_dotenv()
 
@@ -26,7 +25,8 @@ GCS_BUCKET = os.getenv('GCS_BUCKET')
 PAGE_SIZE = int(os.getenv('PAGE_SIZE', 5000))
 TIMEOUT_SECS = int(os.getenv('TIMEOUT_SECS', 120))
 
-# We remove the failing environment check here.
+# REMOVED: if not all([...]): raise EnvironmentError("Missing required env vars")
+# This check is now inside _init_clients()
 
 # === AUTO-DETECT: LOCAL OR CLOUD ===
 IS_LOCAL = os.getenv('LOCAL_TEST', 'false').lower() == 'true'
@@ -49,14 +49,16 @@ session = requests.Session()
 session.auth = ("apikey", API_TOKEN)
 session.headers.update({"Accept": "application/hal+json"})
 
+# REMOVED: The entire original GCP CLIENTS block is deleted from here.
+
 # ----------------------------------------------------
-# 🌟 NEW FUNCTION: Client Initialization
+# ✅ FIX: Client Initialization Function
 # This runs only when a request hits the '/' endpoint.
 # ----------------------------------------------------
 def _init_clients():
     global storage_client, bq_client, sm_imported
 
-    # 1. Check if required environment variables are present
+    # 1. Check if required environment variables are present (Now non-fatal on startup)
     if not all([API_TOKEN, BASE_URL, PROJECT_ID, DATASET_ID, GCS_BUCKET]):
         raise EnvironmentError("Missing required env vars. Check Cloud Run configuration.")
 
@@ -66,7 +68,7 @@ def _init_clients():
 
     if not IS_LOCAL:
         log("Initializing GCP clients...")
-        # Only import GCP modules if we need them, using the flag to avoid repeated import
+        # Only import GCP modules if we need them
         if not sm_imported:
             from google.cloud import storage, bigquery, secretmanager
             from google.oauth2 import service_account
@@ -85,12 +87,13 @@ def _init_clients():
             bq_client = bigquery.Client(credentials=credentials, project=PROJECT_ID)
             log("GCP clients initialized successfully.")
         except Exception as e:
-            # Raising a RuntimeError will stop the sync thread.
-            raise RuntimeError(f"Failed to init GCP clients (Check permissions): {e}")
+            # Raising a RuntimeError will stop the sync thread gracefully
+            log(f"[ERROR] Failed to init GCP clients (Check permissions): {e}")
+            raise RuntimeError(f"GCP Client Init Failed: {e}")
     else:
         log("Running in local mode, skipping GCP client init.")
 
-# === RETRY DECORATOR ===
+# === RETRY DECORATOR (Unchanged) ===
 def retry(max_attempts=3, delay=10, backoff=2):
     def decorator(func):
         def wrapper(*args, **kwargs):
@@ -111,13 +114,13 @@ def retry(max_attempts=3, delay=10, backoff=2):
         return wrapper
     return decorator
 
-# === HELPER: Extract ID from href ===
+# === HELPER: Extract ID from href (Unchanged) ===
 def id_from_href(href, resource):
     if not href: return None
     m = re.search(rf"/api/v3/{re.escape(resource)}/(\d+)", href)
     return m.group(1) if m else None
 
-# === TIME PARSING ===
+# === TIME PARSING (Unchanged) ===
 def parse_iso8601_duration_to_hours(dur):
     if not dur or not dur.startswith("P"): return None
     try:
@@ -135,7 +138,7 @@ def format_hours_hm(h):
     mins = int(round(h * 60))
     return f"{mins // 60}h {mins % 60}m"
 
-# === FETCH ALL WORK PACKAGES ===
+# === FETCH ALL WORK PACKAGES (Unchanged) ===
 @retry(max_attempts=3, delay=10, backoff=2)
 def fetch_all_work_packages_for_project(project_id):
     base = urljoin(BASE_URL, "/api/v3/work_packages")
@@ -183,7 +186,7 @@ def fetch_all_work_packages_for_project(project_id):
         log(f"  → Page {current_page}/{total_pages} | Fetched {len(items)} | Total: {total_fetched}/{total_expected}")
         offset += len(items) if items else page_size
 
-# === TASK CATEGORY HELPERS ===
+# === TASK CATEGORY HELPERS (Unchanged) ===
 _category_name_cache = {}
 _schema_cf_map_cache = {}
 _cf_option_name_cache = {}
@@ -257,7 +260,7 @@ def get_task_category_for_wp(wp, project_id):
             return resolve_custom_option_name(val) or "No Category"
     return "No Category"
 
-# === UPLOAD CSV TO GCS ===
+# === UPLOAD CSV TO GCS (Unchanged logic, uses global client) ===
 def upload_csv_to_gcs(df, bucket_name, blob_name):
     csv_buffer = StringIO()
     df.to_csv(csv_buffer, index=False)
@@ -271,20 +274,18 @@ def upload_csv_to_gcs(df, bucket_name, blob_name):
         log(f"[LOCAL GCS] Saved {blob_name}")
         return f"file://{path}"
     else:
-        # Use the globally defined storage_client
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         blob.upload_from_string(csv_buffer.getvalue(), content_type="text/csv")
         log(f"Uploaded gs://{bucket_name}/{blob_name}")
         return f"gs://{bucket_name}/{blob_name}"
 
-# === LOAD FROM GCS TO BIGQUERY ===
+# === LOAD FROM GCS TO BIGQUERY (Unchanged logic, uses global client) ===
 def load_gcs_to_bigquery(gcs_uri, table_name):
     if IS_LOCAL:
         log(f"[LOCAL BQ] Would load {gcs_uri} to {DATASET_ID}.{table_name}")
         return
 
-    # Use the globally defined bq_client
     dataset_ref = bq_client.dataset(DATASET_ID)
     table_ref = dataset_ref.table(table_name)
 
@@ -324,13 +325,14 @@ def load_gcs_to_bigquery(gcs_uri, table_name):
 
 # === MAIN SYNC ===
 def openproject_to_bigquery():
-    # 🌟 NEW: Initialize clients at the start of the sync job
+    # ✅ FIX: Call init at the start of the sync job (within the thread)
     try:
         _init_clients()
     except Exception as e:
         log(f"Sync failed at initialization: {e}")
         return
 
+    # Rest of the sync logic remains unchanged
     url = urljoin(BASE_URL + "/", "api/v3/projects?offset=1&pageSize=100")
     projects = []
     while url:
@@ -403,7 +405,7 @@ def openproject_to_bigquery():
 
     log("Sync completed")
 
-# === HTTP ENDPOINTS ===
+# === HTTP ENDPOINTS (Unchanged) ===
 @app.route('/', methods=['GET'])
 def trigger():
     threading.Thread(target=openproject_to_bigquery).start()
